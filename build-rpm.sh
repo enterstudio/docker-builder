@@ -18,6 +18,7 @@ MOCK_BIN=/usr/bin/mock-urpm
 config_dir=/etc/mock-urpm/
 build_package=$HOME/$PACKAGE
 OUTPUT_FOLDER=${HOME}/output
+FILE_STORE_URL="http://file-store.openmandriva.org/api/v1/file_stores"
 # Qemu ARM binaries
 QEMU_ARM_SHA="723161ec6cdd569cf6897431c64629451f76a036"
 QEMU_ARM_BINFMT_SHA="352b636da23bee8caf56f8fd000f908e45ae8386"
@@ -116,8 +117,8 @@ esac
 if [[ "$platform_arch" == "aarch64" ]]; then
 if [ $cpu != "aarch64" ] ; then
 # this string responsible for "cannot execute binary file"
-wget -O $HOME/qemu-aarch64 --content-disposition http://file-store.rosalinux.ru/api/v1/file_stores/$QEMU_ARM64_SHA --no-check-certificate &> /dev/null
-wget -O $HOME/qemu-aarch64-binfmt --content-disposition http://file-store.rosalinux.ru/api/v1/file_stores/$QEMU_ARM64_BINFMT_SHA --no-check-certificate &> /dev/null
+wget -O $HOME/qemu-aarch64 --content-disposition $FILE_STORE_URL/$QEMU_ARM64_SHA --no-check-certificate &> /dev/null
+wget -O $HOME/qemu-aarch64-binfmt --content-disposition $FILE_STORE_URL/$QEMU_ARM64_BINFMT_SHA --no-check-certificate &> /dev/null
 chmod +x $HOME/qemu-aarch64 $HOME/qemu-aarch64-binfmt
 # hack to copy qemu binary in non-existing path
 (while [ ! -e  /var/lib/mock-urpm/openmandriva-$platform_arch/root/usr/bin/ ]
@@ -133,8 +134,8 @@ if [[ "$platform_arch" == "armv7hl" ]]; then
 if [ $cpu != "arm" ] ; then
 # this string responsible for "cannot execute binary file"
 # change path to qemu
-wget -O $HOME/qemu-arm --content-disposition http://file-store.rosalinux.ru/api/v1/file_stores/$QEMU_ARM_SHA  --no-check-certificate &> /dev/null
-wget -O $HOME/qemu-arm-binfmt --content-disposition http://file-store.rosalinux.ru/api/v1/file_stores/$QEMU_ARM_BINFMT_SHA --no-check-certificate &> /dev/null
+wget -O $HOME/qemu-arm --content-disposition $FILE_STORE_URL/$QEMU_ARM_SHA  --no-check-certificate &> /dev/null
+wget -O $HOME/qemu-arm-binfmt --content-disposition $FILE_STORE_URL/$QEMU_ARM_BINFMT_SHA --no-check-certificate &> /dev/null
 chmod +x $HOME/qemu-arm $HOME/qemu-arm-binfmt
 # hack to copy qemu binary in non-existing path
 (while [ ! -e  /var/lib/mock-urpm/openmandriva-$platform_arch/root/usr/bin/ ]
@@ -148,6 +149,40 @@ fi
 
 }
 probe_cpu
+}
+
+download_cache() {
+
+cached_chroot=0
+if [[ "${CACHED_CHROOT_SHA1}" != '' ]] ; then
+  fullname=`curl -sL ${FILE_STORE_URL}?hash=${CACHED_CHROOT_SHA1} | grep -Po '"file_name":".*",' | sed -e 's/"file_name":"//g' | sed -e 's/",//g'`
+  if [ "${fullname}" != '' ] ; then
+    comp='gz'
+    if [[ "${fullname}" =~ .*\.xz$ ]] ; then
+      comp='xz'
+    fi
+
+    wget -O $ /tmp/chroot.tar.${comp} --content-disposition ${FILE_STORE_URL}/${CACHED_CHROOT_SHA1}
+	
+	conf_path=`cat $config_dir/default.cfg | grep "config_opts\['root']" | awk '{ print $3 }' | sed "s/'//g"`
+	cached_chroot_path=/var/lib/mock-urpm/$conf_path
+    mkdir -p ${cached_chroot_path}
+    sudo tar -C /tmp -xf /tmp/chroot.tar.${comp}
+    # Save exit code
+    rc=$?
+    if [ $rc != 0 ] ; then
+      sudo rm -rf /tmp/chroot.tar.${comp}
+      echo "--> Error on extracting chroot with sha1 '$CACHED_CHROOT_SHA1'!!!"
+    else
+      sudo mv -f /tmp/var/lib/$conf_path /var/lib/mock-urpm/
+      cached_chroot=1
+    fi
+    sudo rm -rf /tmp/chroot.tar.*z /tmp/var/lib/$conf_path
+  else
+    echo "--> Chroot with sha1 '${CACHED_CHROOT_SHA1}' does not exist!!!"
+  fi
+fi
+
 }
 
 build_rpm() {
@@ -165,8 +200,16 @@ try_rebuild=true
 retry=0
 while $try_rebuild
 do
+
     rm -rf $OUTPUT_FOLDER
-    $MOCK_BIN -v --configdir=$config_dir --buildsrpm --spec=$build_package/${PACKAGE}.spec --sources=$build_package --no-cleanup-after $extra_build_src_rpm_options --resultdir=$OUTPUT_FOLDER
+	if [ $cached_chroot == 1 ] ; then
+		echo "--> Uses cached chroot with sha1 '$CACHED_CHROOT_SHA1'..."
+		$MOCK_BIN --chroot "urpmi.removemedia -a"
+		$MOCK_BIN --readdrepo -v --configdir $config_dir
+		$MOCK_BIN -v --configdir=$config_dir --buildsrpm --spec=$build_package/${PACKAGE}.spec --sources=$build_package --no-cleanup-after --no-clean $extra_build_src_rpm_options --resultdir=$OUTPUT_FOLDER
+	else
+		$MOCK_BIN -v --configdir=$config_dir --buildsrpm --spec=$build_package/${PACKAGE}.spec --sources=$build_package --no-cleanup-after $extra_build_src_rpm_options --resultdir=$OUTPUT_FOLDER
+	fi
     rc=$?
     try_rebuild=false
     if [[ $rc != 0 && $retry < $MAX_RETRIES ]] ; then
@@ -271,6 +314,7 @@ popd
 
 generate_config
 clone_repo
+download_cache
 build_rpm
 container_data
 # wipe package
